@@ -4,7 +4,6 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
-from stonks_modules import *
 from numba import njit
 import os
 
