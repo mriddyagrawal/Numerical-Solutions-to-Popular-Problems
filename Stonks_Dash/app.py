@@ -8,13 +8,13 @@ from plotly.subplots import make_subplots
 from functools import lru_cache
 
 # Import from local backend
-from backend import fetch_hourly_data, run_all_backtests, buy_basic_dip_strategy_timeseries
+from backend import fetch_hourly_data, run_all_backtests, buy_basic_dip_strategy_timeseries, buy_momentum_dip_strategy_timeseries
 
 # -----------------------------------------------------
 # CACHING BACKTEST RESULTS (Server-side)
 # -----------------------------------------------------
 @lru_cache(maxsize=32)
-def get_backtest_results(ticker_symbol, buy_min, buy_max, sell_min, sell_max, grid_resolution):
+def get_backtest_results(ticker_symbol, buy_min, buy_max, sell_min, sell_max, stop_loss_multiplier, grid_resolution, strategy_type="basic", momentum_window=20, momentum_min=0.005, momentum_max=0.03, fallback_momentum_min=0.0, fallback_momentum_max=0.05):
     df = fetch_hourly_data(ticker_symbol)
     if df.empty:
         return None
@@ -25,16 +25,19 @@ def get_backtest_results(ticker_symbol, buy_min, buy_max, sell_min, sell_max, gr
     sell_multipliers = np.round(np.linspace(sell_min, sell_max, grid_resolution), decimals=3)
     buy_multipliers = np.round(np.linspace(buy_min, buy_max, grid_resolution), decimals=3)
     
+    dates_array = df.index.strftime('%Y-%m-%d %H:%M:%S').tolist()
+    
     results_dict, global_min, global_max, wait_periods = run_all_backtests(
-        closes_array, buy_multipliers, sell_multipliers, baseline_profit
+        closes_array, buy_multipliers, sell_multipliers, stop_loss_multiplier, baseline_profit, strategy_type, momentum_window, momentum_min, momentum_max, fallback_momentum_min, fallback_momentum_max
     )
     return {
         "results_dict": results_dict,
         "global_min": global_min,
         "global_max": global_max,
         "wait_periods": wait_periods,
-        "sell_multipliers": sell_multipliers,
-        "buy_multipliers": buy_multipliers,
+        "dates_array": dates_array,
+        "sell_multipliers": sell_multipliers.tolist(),
+        "buy_multipliers": buy_multipliers.tolist(),
         "closes_array": closes_array,
         "baseline_profit": baseline_profit
     }
@@ -58,26 +61,51 @@ sidebar = dbc.Card(
         dbc.Input(id="ticker-input", value="NVDA", type="text", debounce=True),
         html.Br(),
         
+        dbc.Label("Strategy Selection"),
+        dcc.Dropdown(
+            id="strategy-select",
+            options=[
+                {"label": "Basic Dip Strategy", "value": "basic"},
+                {"label": "Momentum Dip Strategy", "value": "momentum"}
+            ],
+            value="basic",
+            clearable=False,
+            style={"color": "black"} # Text color for light dropdown on dark theme
+        ),
+        html.Br(),
+        
         html.H5("Grid Search Parameters"),
+        dbc.Label("Momentum Window (Periods)"),
+        dcc.Slider(5, 100, 5, value=20, id="momentum-window", marks={5: {'label': "5", 'style': {'color': '#b0b0b0'}}, 50: {'label': "50", 'style': {'color': '#b0b0b0'}}, 100: {'label': "100", 'style': {'color': '#b0b0b0'}}}),
+        
+        # TODO: For later UI exposure, add new parameter sliders here:
+        # - momentum_min (e.g. range 0.001 - 0.01)
+        # - momentum_max (e.g. range 0.01 - 0.05)
+        # - fallback_momentum_min (e.g. range -0.01 - 0.01)
+        # - fallback_momentum_max (e.g. range 0.01 - 0.10)
+        
         dbc.Label("Min Sell Multiplier"),
-        dcc.Slider(1.01, 1.05, 0.01, value=1.01, id="sell-min", marks={1.01: "1.01", 1.05: "1.05"}),
+        dcc.Slider(1.01, 1.05, 0.01, value=1.02, id="sell-min", marks={1.01: {'label': "1.01", 'style': {'color': '#b0b0b0'}}, 1.05: {'label': "1.05", 'style': {'color': '#b0b0b0'}}}),
         
         dbc.Label("Max Sell Multiplier"),
-        dcc.Slider(1.06, 1.20, 0.01, value=1.10, id="sell-max", marks={1.06: "1.06", 1.20: "1.20"}),
+        dcc.Slider(1.06, 1.20, 0.01, value=1.10, id="sell-max", marks={1.06: {'label': "1.06", 'style': {'color': '#b0b0b0'}}, 1.20: {'label': "1.20", 'style': {'color': '#b0b0b0'}}}),
         
         dbc.Label("Min Buy Multiplier"),
-        dcc.Slider(0.80, 0.95, 0.01, value=0.90, id="buy-min", marks={0.80: "0.80", 0.95: "0.95"}),
+        dcc.Slider(0.80, 0.95, 0.01, value=0.90, id="buy-min", marks={0.80: {'label': "0.80", 'style': {'color': '#b0b0b0'}}, 0.95: {'label': "0.95", 'style': {'color': '#b0b0b0'}}}),
         
         dbc.Label("Max Buy Multiplier"),
-        dcc.Slider(0.96, 0.99, 0.01, value=0.99, id="buy-max", marks={0.96: "0.96", 0.99: "0.99"}),
+        dcc.Slider(0.96, 0.99, 0.01, value=0.99, id="buy-max", marks={0.96: {'label': "0.96", 'style': {'color': '#b0b0b0'}}, 0.99: {'label': "0.99", 'style': {'color': '#b0b0b0'}}}),
+
+        dbc.Label("Stop Loss Multiplier"),
+        dcc.Slider(0.80, 0.99, 0.01, value=0.95, id="stop-loss", marks={0.80: {'label': "0.80", 'style': {'color': '#b0b0b0'}}, 0.99: {'label': "0.99", 'style': {'color': '#b0b0b0'}}}),
         
         dbc.Label("Grid Resolution (N x N)"),
-        dcc.Slider(10, 100, 10, value=50, id="grid-res", marks={10: "10", 100: "100"}),
+        dcc.Slider(10, 100, 10, value=50, id="grid-res", marks={10: {'label': "10", 'style': {'color': '#b0b0b0'}}, 100: {'label': "100", 'style': {'color': '#b0b0b0'}}}),
         
         html.Hr(),
         html.H5("Visualization Filters"),
         dbc.Label("Minimum Profit Threshold (%) (For 3D Scatter)"),
-        dcc.Slider(-50.0, 100.0, 5.0, value=10.0, id="min-profit", marks={-50: "-50", 0: "0", 100: "100"}),
+        dcc.Slider(-50.0, 100.0, 5.0, value=10.0, id="min-profit", marks={-50: {'label': "-50", 'style': {'color': '#b0b0b0'}}, 0: {'label': "0", 'style': {'color': '#b0b0b0'}}, 100: {'label': "100", 'style': {'color': '#b0b0b0'}}}),
         
         html.Br(),
         dbc.Button("Run Backtests", id="run-btn", color="primary", className="w-100"),
@@ -96,7 +124,7 @@ content = dbc.Tabs(
                 dbc.Row([
                     dbc.Col([
                         dbc.Label("Wait Period (Hours)"),
-                        dcc.Slider(1, 20, 1, value=5, id="wait-slider-2d", marks={i: str(i) for i in range(1, 21)})
+                        dcc.Slider(1, 20, 1, value=5, id="wait-slider-2d", marks={i: {'label': str(i), 'style': {'color': '#b0b0b0'}} for i in range(1, 21)})
                     ])
                 ]),
                 dcc.Graph(id="fig-2d", style={"height": "75vh"})
@@ -131,6 +159,7 @@ content = dbc.Tabs(
                 dbc.Row([
                     dbc.Col([dbc.Label("Buy Multiplier"), dbc.Input(id="drill-buy", type="number", value=0.90, step=0.005)]),
                     dbc.Col([dbc.Label("Sell Multiplier"), dbc.Input(id="drill-sell", type="number", value=1.05, step=0.01)]),
+                    dbc.Col([dbc.Label("Stop Loss"), dbc.Input(id="drill-stop", type="number", value=0.95, step=0.01)]),
                     dbc.Col([dbc.Label("Wait Period"), dbc.Input(id="drill-wait", type="number", value=5, step=1)]),
                     dbc.Col([
                         html.Br(),
@@ -139,6 +168,7 @@ content = dbc.Tabs(
                             options=[{"label": " Show Trade Overlays", "value": "show"}],
                             value=["show"],
                             inline=True,
+                            labelStyle={'color': '#b0b0b0'},
                             className="mt-2"
                         )
                     ])
@@ -193,19 +223,22 @@ app.layout = dbc.Container(
     [Input("run-btn", "n_clicks"), Input("wait-slider-2d", "value")],
     [
         State("ticker-input", "value"),
+        State("strategy-select", "value"),
+        State("momentum-window", "value"),
         State("sell-min", "value"),
         State("sell-max", "value"),
         State("buy-min", "value"),
         State("buy-max", "value"),
+        State("stop-loss", "value"),
         State("grid-res", "value")
     ]
 )
-def update_main_figures(n_clicks, wait_2d, ticker, sell_min, sell_max, buy_min, buy_max, grid_res):
+def update_main_figures(n_clicks, wait_2d, ticker, strategy_type, momentum_win, sell_min, sell_max, buy_min, buy_max, stop_loss, grid_res):
     ticker = ticker.strip().upper()
     if not ticker:
         return "Please enter a ticker", "", "", go.Figure(), go.Figure(), go.Figure()
 
-    res = get_backtest_results(ticker, buy_min, buy_max, sell_min, sell_max, grid_res)
+    res = get_backtest_results(ticker, buy_min, buy_max, sell_min, sell_max, stop_loss, grid_res, strategy_type, momentum_win)
     if not res:
         return f"No data for {ticker}", f"No data", "", go.Figure(), go.Figure(), go.Figure()
 
@@ -272,19 +305,22 @@ def update_main_figures(n_clicks, wait_2d, ticker, sell_min, sell_max, buy_min, 
     [Input("run-btn", "n_clicks"), Input("min-profit", "value")],
     [
         State("ticker-input", "value"),
+        State("strategy-select", "value"),
+        State("momentum-window", "value"),
         State("sell-min", "value"),
         State("sell-max", "value"),
         State("buy-min", "value"),
         State("buy-max", "value"),
+        State("stop-loss", "value"),
         State("grid-res", "value")
     ]
 )
-def update_scatter(n_clicks, min_profit, ticker, sell_min, sell_max, buy_min, buy_max, grid_res):
+def update_scatter(n_clicks, min_profit, ticker, strategy_type, momentum_win, sell_min, sell_max, buy_min, buy_max, stop_loss, grid_res):
     ticker = ticker.strip().upper()
     if not ticker:
         return go.Figure()
 
-    res = get_backtest_results(ticker, buy_min, buy_max, sell_min, sell_max, grid_res)
+    res = get_backtest_results(ticker, buy_min, buy_max, sell_min, sell_max, stop_loss, grid_res, strategy_type, momentum_win)
     if not res:
         return go.Figure()
 
@@ -335,50 +371,80 @@ def update_scatter(n_clicks, min_profit, ticker, sell_min, sell_max, buy_min, bu
 @app.callback(
     [Output("drill-buy", "value"),
      Output("drill-sell", "value"),
+     Output("drill-stop", "value"),
      Output("drill-wait", "value")],
     [Input("fig-scatter", "clickData")],
+    [State("stop-loss", "value")],
     prevent_initial_call=True
 )
-def update_drilldown_from_scatter(clickData):
+def update_drilldown_from_scatter(clickData, current_stop_loss):
     if clickData and "points" in clickData:
         point = clickData["points"][0]
         # x is sell, y is buy, z is wait
-        return point["y"], point["x"], point["z"]
-    return dash.no_update, dash.no_update, dash.no_update
+        return point["y"], point["x"], current_stop_loss, point["z"]
+    return dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
 
 @app.callback(
     Output("fig-drill", "figure"),
     [Input("drill-buy", "value"),
      Input("drill-sell", "value"),
+     Input("drill-stop", "value"),
      Input("drill-wait", "value"),
      Input("ticker-input", "value"),
      Input("toggle-shade", "value")],
     [
+        State("strategy-select", "value"),
+        State("momentum-window", "value"),
         State("sell-min", "value"),
         State("sell-max", "value"),
         State("buy-min", "value"),
         State("buy-max", "value"),
+        State("stop-loss", "value"),
         State("grid-res", "value")    
     ]
 )
-def update_drilldown_fig(buy_val, sell_val, wait_val, ticker, show_shade, s_min, s_max, b_min, b_max, res_val):
+def update_drilldown_fig(buy_val, sell_val, stop_val, wait_val, ticker, show_shade, strategy_type, momentum_win, s_min, s_max, b_min, b_max, s_loss, res_val):
     ticker = ticker.strip().upper()
-    if not ticker or buy_val is None or sell_val is None or wait_val is None:
+    if not ticker or buy_val is None or sell_val is None or stop_val is None or wait_val is None:
         return go.Figure()
 
-    res = get_backtest_results(ticker, b_min, b_max, s_min, s_max, res_val)
+    res = get_backtest_results(ticker, b_min, b_max, s_min, s_max, s_loss, res_val, strategy_type, momentum_win)
     if not res:
         return go.Figure()
     
     closes_array = res["closes_array"]
-    history, buy_indices, sell_indices = buy_basic_dip_strategy_timeseries(closes_array, buy_val, sell_val, int(wait_val))
+    sma_scaled_array = None
+    
+    if strategy_type == "momentum":
+        # TODO: Link momentum_min, momentum_max, and fallback parameters from UI states here when added
+        history, buy_indices, sell_indices, sma_history = buy_momentum_dip_strategy_timeseries(closes_array, buy_val, sell_val, stop_val, int(wait_val), int(momentum_win), 0.005, 0.03, 0.0, 0.05)
+        # Scale SMA history to match portfolio investment base ($100 initial)
+        sma_scaled_array = (100 / closes_array[0]) * sma_history
+    else:
+        history, buy_indices, sell_indices = buy_basic_dip_strategy_timeseries(closes_array, buy_val, sell_val, stop_val, int(wait_val))
+    
+    # Calculate baseline trajectory: buying $100 worth of stock at start and holding
     baseline_history = (100 / closes_array[0]) * closes_array
     
+    # Retrieve the literal dates array to pipe into X-axes
+    dates_array = res["dates_array"]
+
     fig_ts = go.Figure()
+
+    # 0. SMA - Orange Dashed logic
+    if sma_scaled_array is not None:
+        fig_ts.add_trace(go.Scatter(
+            x=dates_array,
+            y=sma_scaled_array,
+            mode='lines',
+            name=f"{momentum_win}-Period SMA",
+            line=dict(color='#FFA500', dash='dot', width=2)
+        ))
     
     # 1. Baseline - Solid Blue
     fig_ts.add_trace(go.Scatter(
+        x=dates_array,
         y=baseline_history, 
         mode='lines', 
         name="Baseline (Buy & Hold)", 
@@ -387,32 +453,31 @@ def update_drilldown_fig(buy_val, sell_val, wait_val, ticker, show_shade, s_min,
     
     # 2. Strategy Performance Line
     fig_ts.add_trace(go.Scatter(
+        x=dates_array,
         y=history, 
         mode='lines', 
         name=f"Strategy B:{buy_val} S:{sell_val} W:{wait_val}", 
         line=dict(color='#00CC96', width=2)
     ))
     
-    # 3. Buy Markers
+    # 3. Buy Signals - Green Triangles
     if len(buy_indices) > 0:
         fig_ts.add_trace(go.Scatter(
-            x=buy_indices,
-            y=history[buy_indices],
-            mode='markers',
-            name='Buy Signal',
-            marker=dict(color='lime', size=8, symbol='triangle-up'),
-            hoverinfo='skip'
+            x=[dates_array[i] for i in buy_indices], 
+            y=[history[i] for i in buy_indices], 
+            mode='markers', 
+            name="Buy Signal", 
+            marker=dict(symbol='triangle-up', color='lime', size=10, line=dict(color='black', width=1))
         ))
-
-    # 4. Sell Markers
+        
+    # 4. Sell Signals - Red Triangles (or Stop Loss)
     if len(sell_indices) > 0:
         fig_ts.add_trace(go.Scatter(
-            x=sell_indices,
-            y=history[sell_indices],
-            mode='markers',
-            name='Sell Signal',
-            marker=dict(color='red', size=8, symbol='triangle-down'),
-            hoverinfo='skip'
+            x=[dates_array[i] for i in sell_indices], 
+            y=[history[i] for i in sell_indices], 
+            mode='markers', 
+            name="Sell Signal", 
+            marker=dict(symbol='triangle-down', color='crimson', size=10, line=dict(color='black', width=1))
         ))
 
     shapes = []
@@ -440,8 +505,8 @@ def update_drilldown_fig(buy_val, sell_val, wait_val, ticker, show_shade, s_min,
                 shapes.append(dict(
                     type="rect",
                     xref="x", yref="paper",
-                    x0=buy_idx, y0=0,
-                    x1=sell_idx, y1=1,
+                    x0=dates_array[buy_idx], y0=0,
+                    x1=dates_array[sell_idx], y1=1,
                     fillcolor=shade_color,
                     layer="below",
                     line_width=0
@@ -470,8 +535,8 @@ def update_drilldown_fig(buy_val, sell_val, wait_val, ticker, show_shade, s_min,
                 shapes.append(dict(
                     type="rect",
                     xref="x", yref="paper",
-                    x0=sell_idx, y0=0,
-                    x1=next_buy_idx, y1=1,
+                    x0=dates_array[sell_idx], y0=0,
+                    x1=dates_array[next_buy_idx], y1=1,
                     fillcolor=shade_color,
                     layer="below",
                     line_width=0
@@ -479,7 +544,7 @@ def update_drilldown_fig(buy_val, sell_val, wait_val, ticker, show_shade, s_min,
 
     fig_ts.update_layout(
         title=f"Portfolio Value over Time - {ticker} (Starting Capital: $100)",
-        xaxis_title="Hours Passed",
+        xaxis_title="Date",
         yaxis_title="Account Value ($)",
         margin=dict(l=0, r=0, t=40, b=0),
         hovermode="x unified",
